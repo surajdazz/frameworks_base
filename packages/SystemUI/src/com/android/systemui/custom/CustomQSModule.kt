@@ -1,6 +1,7 @@
 package com.android.systemui.custom
 
 import com.android.systemui.qs.tileimpl.QSTileImpl
+import com.android.systemui.qs.tiles.DcDimmingTile
 import com.android.systemui.qs.tiles.PowerShareTile
 import com.android.systemui.qs.tiles.CellularTile
 import com.android.systemui.qs.tiles.WifiTile
@@ -46,6 +47,12 @@ interface CustomQSModule {
     @IntoMap
     @StringKey(CaffeineTile.TILE_SPEC)
     fun bindCaffeineTile(caffeineTile: CaffeineTile): QSTileImpl<*>
+
+    /** Inject DcDimmingTile into tileMap in QSModule */
+    @Binds
+    @IntoMap
+    @StringKey(DcDimmingTile.TILE_SPEC)
+    fun bindDcDimmingTile(dcDimmingTile: DcDimmingTile): QSTileImpl<*>
 
     /** Inject HeadsUpTile into tileMap in QSModule */
     @Binds
