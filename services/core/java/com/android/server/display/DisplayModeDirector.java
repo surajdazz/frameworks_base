@@ -140,6 +140,14 @@ public class DisplayModeDirector {
 
     private boolean mAlwaysRespectAppRequest;
 
+    private boolean mIsInsideLowZone;
+    private boolean mIsInsideHighZone;
+    private boolean mIsDcDimmingActive;
+
+    private int mRefreshRateInLowZone;
+    private int mRefreshRateInHighZone;
+    private float mPreferredRefreshRate;
+
     /**
      * The allowed refresh rate switching type. This is used by SurfaceFlinger.
      */
@@ -699,6 +707,30 @@ public class DisplayModeDirector {
         return maxRefreshRate;
     }
 
+    private void updateFlickerRefreshRateVoteLocked() {
+        Vote refreshRateVote = null;
+        Vote refreshRateSwitchingVote = null;
+
+        if (mIsDcDimmingActive) {
+            refreshRateVote = Vote.forRefreshRates(mPreferredRefreshRate, mPreferredRefreshRate);
+            refreshRateSwitchingVote = Vote.forDisableRefreshRateSwitching();
+        }
+        if (mIsInsideLowZone) {
+            refreshRateVote = Vote.forRefreshRates(mRefreshRateInLowZone, mRefreshRateInLowZone);
+            refreshRateSwitchingVote = Vote.forDisableRefreshRateSwitching();
+        }
+        if (mIsInsideHighZone) {
+            refreshRateVote = Vote.forRefreshRates(mRefreshRateInHighZone, mRefreshRateInHighZone);
+            refreshRateSwitchingVote = Vote.forDisableRefreshRateSwitching();
+        }
+
+        if (mLoggingEnabled) {
+            Slog.d(TAG, "Flicker refresh rate vote: " + refreshRateVote);
+        }
+        updateVoteLocked(Vote.PRIORITY_FLICKER_REFRESH_RATE, refreshRateVote);
+        updateVoteLocked(Vote.PRIORITY_FLICKER_REFRESH_RATE_SWITCH, refreshRateSwitchingVote);
+    }
+
     private void notifyDesiredDisplayModeSpecsChangedLocked() {
         if (mDesiredDisplayModeSpecsListener != null
                 && !mHandler.hasMessages(MSG_REFRESH_RATE_RANGE_CHANGED)) {
@@ -1170,6 +1202,8 @@ public class DisplayModeDirector {
                 Settings.Global.getUriFor(Settings.Global.LOW_POWER_MODE);
         private final Uri mMatchContentFrameRateSetting =
                 Settings.Secure.getUriFor(Settings.Secure.MATCH_CONTENT_FRAME_RATE);
+        private final Uri mDcDimmingStateSetting =
+                Settings.System.getUriFor(Settings.System.DC_DIMMING_STATE);
 
         private final Context mContext;
         private float mDefaultPeakRefreshRate;
@@ -1208,6 +1242,8 @@ public class DisplayModeDirector {
                     UserHandle.USER_SYSTEM);
             cr.registerContentObserver(mMatchContentFrameRateSetting, false /*notifyDescendants*/,
                     this);
+            cr.registerContentObserver(mDcDimmingStateSetting, false /*notifyDescendants*/, this,
+                    UserHandle.USER_CURRENT);
 
             Float deviceConfigDefaultPeakRefresh =
                     mDeviceConfigDisplaySettings.getDefaultPeakRefreshRate();
@@ -1219,6 +1255,7 @@ public class DisplayModeDirector {
                 updateRefreshRateSettingLocked();
                 updateLowPowerModeSettingLocked();
                 updateModeSwitchingTypeSettingLocked();
+                updateDcDimmingStateSettingLocked();
             }
         }
 
@@ -1252,6 +1289,8 @@ public class DisplayModeDirector {
                     updateLowPowerModeSettingLocked();
                 } else if (mMatchContentFrameRateSetting.equals(uri)) {
                     updateModeSwitchingTypeSettingLocked();
+                } else if (mDcDimmingStateSetting.equals(uri)) {
+                    updateDcDimmingStateSettingLocked();
                 }
             }
         }
@@ -1321,9 +1360,14 @@ public class DisplayModeDirector {
             updateVoteLocked(Vote.PRIORITY_USER_SETTING_PEAK_REFRESH_RATE, peakVote);
             updateVoteLocked(Vote.PRIORITY_USER_SETTING_MIN_REFRESH_RATE,
                     Vote.forRefreshRates(minRefreshRate, Float.POSITIVE_INFINITY));
+
             Vote defaultVote =
                     defaultRefreshRate == 0f ? null : Vote.forRefreshRates(0f, defaultRefreshRate);
             updateVoteLocked(Vote.PRIORITY_DEFAULT_REFRESH_RATE, defaultVote);
+
+            mPreferredRefreshRate = Math.max(minRefreshRate,
+                    Math.min(defaultRefreshRate, peakRefreshRate));
+            updateFlickerRefreshRateVoteLocked();
 
             float maxRefreshRate;
             if (peakRefreshRate == 0f && defaultRefreshRate == 0f) {
@@ -1354,6 +1398,12 @@ public class DisplayModeDirector {
                 mModeSwitchingType = switchingType;
                 notifyDesiredDisplayModeSpecsChangedLocked();
             }
+        }
+
+        private void updateDcDimmingStateSettingLocked() {
+            mIsDcDimmingActive = Settings.System.getIntForUser(mContext.getContentResolver(),
+                    Settings.System.DC_DIMMING_STATE, 0, UserHandle.USER_CURRENT) == 1;
+            updateFlickerRefreshRateVoteLocked();
         }
 
         public void dumpLocked(PrintWriter pw) {
@@ -1594,9 +1644,6 @@ public class DisplayModeDirector {
         private int mDefaultDisplayState = Display.STATE_UNKNOWN;
         private boolean mRefreshRateChangeable = false;
         private boolean mLowPowerModeEnabled = false;
-
-        private int mRefreshRateInLowZone;
-        private int mRefreshRateInHighZone;
 
         BrightnessObserver(Context context, Handler handler, Injector injector) {
             mContext = context;
@@ -2143,36 +2190,19 @@ public class DisplayModeDirector {
             return false;
         }
         private void onBrightnessChangedLocked() {
-            Vote refreshRateVote = null;
-            Vote refreshRateSwitchingVote = null;
-
             if (mBrightness < 0) {
                 // Either the setting isn't available or we shouldn't be observing yet anyways.
                 // Either way, just bail out since there's nothing we can do here.
                 return;
             }
 
-            boolean insideLowZone = hasValidLowZone() && isInsideLowZone(mBrightness, mAmbientLux);
-            if (insideLowZone) {
-                refreshRateVote =
-                        Vote.forRefreshRates(mRefreshRateInLowZone, mRefreshRateInLowZone);
-                refreshRateSwitchingVote = Vote.forDisableRefreshRateSwitching();
-            }
-
-            boolean insideHighZone = hasValidHighZone()
-                    && isInsideHighZone(mBrightness, mAmbientLux);
-            if (insideHighZone) {
-                refreshRateVote =
-                        Vote.forRefreshRates(mRefreshRateInHighZone, mRefreshRateInHighZone);
-                refreshRateSwitchingVote = Vote.forDisableRefreshRateSwitching();
-            }
+            mIsInsideLowZone = hasValidLowZone() && isInsideLowZone(mBrightness, mAmbientLux);
+            mIsInsideHighZone = hasValidHighZone() && isInsideHighZone(mBrightness, mAmbientLux);
 
             if (mLoggingEnabled) {
-                Slog.d(TAG, "Display brightness " + mBrightness + ", ambient lux " +  mAmbientLux
-                        + ", Vote " + refreshRateVote);
+                Slog.d(TAG, "Display brightness " + mBrightness + ", ambient lux " +  mAmbientLux);
             }
-            updateVoteLocked(Vote.PRIORITY_FLICKER_REFRESH_RATE, refreshRateVote);
-            updateVoteLocked(Vote.PRIORITY_FLICKER_REFRESH_RATE_SWITCH, refreshRateSwitchingVote);
+            updateFlickerRefreshRateVoteLocked();
         }
 
         private boolean hasValidLowZone() {
